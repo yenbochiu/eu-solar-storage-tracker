@@ -141,3 +141,33 @@ out = (spark.table(T + "gold_monthly_market")
 path = "/Volumes/workspace/energy_tracker/exports/monthly_market.csv"
 out.to_csv(path, index=False)
 print("saved", path, len(out), "rows")
+
+# COMMAND ----------
+
+# Publish the same CSV to GitHub (data/monthly_market.csv) so the scheduled Claude task
+# can update Market_Data and Country_Scorecard in the tracker Sheet without a manual upload.
+# One-time setup: a fine-grained GitHub token with "Contents: Read and write" on this repo only,
+# stored as Databricks secret scope "energy", key "github_token". Without it this step is skipped.
+import base64, requests
+
+REPO, GH_PATH = "yenbochiu/eu-solar-storage-tracker", "data/monthly_market.csv"
+try:
+    gh_token = dbutils.secrets.get("energy", "github_token")
+except Exception:
+    gh_token = None
+    print("Secret energy/github_token not found - skipped GitHub upload")
+
+if gh_token:
+    api = f"https://api.github.com/repos/{REPO}/contents/{GH_PATH}"
+    headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
+    current = requests.get(api, headers=headers, params={"ref": "main"}, timeout=30)
+    body = {
+        "message": f"Update monthly_market.csv ({pd.Timestamp.now(tz='Europe/Amsterdam'):%Y-%m-%d}, {len(out)} rows)",
+        "content": base64.b64encode(out.to_csv(index=False).encode("utf-8")).decode(),
+        "branch": "main",
+    }
+    if current.status_code == 200:
+        body["sha"] = current.json()["sha"]          # required to overwrite the previous month's file
+    resp = requests.put(api, headers=headers, json=body, timeout=60)
+    resp.raise_for_status()                          # fail the job loudly if the upload is rejected
+    print("pushed", GH_PATH, "to", REPO, resp.json()["commit"]["sha"][:7])
